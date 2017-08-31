@@ -7,10 +7,14 @@ import (
 	"time"
 
 	"github.com/OwnLocal/goes"
+	"github.com/zpatrick/go-config"
+
 	"github.com/qframe/types/plugin"
 	"github.com/qframe/types/constants"
 	"github.com/qframe/types/docker-events"
 	"reflect"
+	"github.com/qframe/types/qchannel"
+	"github.com/qframe/types/messages"
 )
 
 const (
@@ -28,12 +32,12 @@ type Plugin struct {
 	KVtoFields  map[string]string
 	SkipKV		[]string
 	last        time.Time
-	cli        	*goes.Client
+	cli        	*goes.Connection
 }
 
 // New returns an initial instance
-func New(b qtypes_plugin.Base, name string) (Plugin, error) {
-	p := qtypes_plugin.NewNamedPlugin(b, pluginTyp, pluginPkg, name, version)
+func New(qChan qtypes_qchannel.QChan, cfg *config.Config, name string) (Plugin, error) {
+	p := qtypes_plugin.NewNamedPlugin(qChan, cfg, pluginTyp, pluginPkg, name, version)
 	esp := Plugin{
 		Plugin: p,
 		buffer: make(chan interface{}, 1000),
@@ -76,6 +80,12 @@ func (p *Plugin) pushToBuffer() {
 	for {
 		val := bg.Recv()
 		switch val.(type) {
+		case qtypes_messages.ContainerMessage:
+			msg := val.(qtypes_messages.ContainerMessage)
+			if msg.StopProcessing(p.Plugin, false) {
+				continue
+			}
+			p.buffer <- msg
 		case qtypes_docker_events.ContainerEvent:
 			msg := val.(qtypes_docker_events.ContainerEvent)
 			if msg.StopProcessing(p.Plugin, false) {
@@ -83,7 +93,7 @@ func (p *Plugin) pushToBuffer() {
 			}
 			p.buffer <- msg
 		default:
-			p.Log("info", fmt.Sprintf("No case for type %s", reflect.TypeOf(val)))
+			p.Log("trace", fmt.Sprintf("No case for type %s", reflect.TypeOf(val)))
 
 		}
 	}
@@ -95,7 +105,7 @@ func (p *Plugin) createESClient() (err error) {
 	now := time.Now()
 	p.indexName = fmt.Sprintf("%s-%04d-%02d-%02d", p.indexPrefix, now.Year(), now.Month(), now.Day())
 	p.Log("info", fmt.Sprintf("Connecting to %s:%s", host, port))
-	p.cli = goes.NewClient(host, port)
+	p.cli = goes.NewConnection(host, port)
 	return
 }
 
@@ -157,13 +167,47 @@ func (p *Plugin) indexContainerEvent(msg qtypes_docker_events.ContainerEvent) (e
 	}
 	d := goes.Document{
 		Index:  p.indexName,
-		Type:   "container-event",
+		Type: "container-event",
 		Fields: data,
 	}
 	extraArgs := make(url.Values, 1)
 	//extraArgs.Set("ttl", "86400000")
 	response, err := p.cli.Index(d, extraArgs)
 	_ = response
+	return
+}
+
+func (p *Plugin) indexContainerMessage(msg qtypes_messages.ContainerMessage) (err error) {
+	data := map[string]interface{}{
+		"msg_version": 	msg.BaseVersion,
+		"Timestamp":   	msg.Time.Format("2006-01-02T15:04:05.999999-07:00"),
+		"msg":         	msg.Message,
+		"source_path": 	strings.Join(msg.SourcePath,","),
+	}
+	if msg.GetContainerName() != "" {
+		data["container_id"] = msg.Container.ID
+		data["container_name"] = msg.GetContainerName()
+		data["container_cmd"] = strings.Join(msg.Container.Config.Cmd, " ")
+		data["image"] = msg.Container.Image
+		data["image_name"] = msg.Container.Config.Image
+		if msg.Container.Node != nil {
+			p.Log("debug", "Set msg.Container.Node")
+			//data["node_name"] = msg.Container.Node.Name
+			//data["node_ip"] = msg.Container.Node.IPAddress
+		}
+
+	}
+	for k,v := range data {
+		p.Log("debug", fmt.Sprintf("%30s: %s", k, v))
+	}
+	d := goes.Document{
+		Index:  p.indexName,
+		Type: 	"container-message",
+		Fields: data,
+	}
+	extraArgs := make(url.Values, 1)
+	//extraArgs.Set("ttl", "86400000")
+	_, err = p.cli.Index(d, extraArgs)
 	return
 }
 
@@ -178,6 +222,9 @@ func (p *Plugin) indexDoc(doc interface{}) (err error) {
 	case qtypes_docker_events.ContainerEvent:
 		msg := doc.(qtypes_docker_events.ContainerEvent)
 		return p.indexContainerEvent(msg)
+	case qtypes_messages.ContainerMessage:
+		msg := doc.(qtypes_messages.ContainerMessage)
+		return p.indexContainerMessage(msg)
 	}
 	return
 }
