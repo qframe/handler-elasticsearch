@@ -181,7 +181,7 @@ func (p *Plugin) indexContainerMessage(msg qtypes_messages.ContainerMessage) (er
 	data := map[string]interface{}{
 		"msg_version": 	msg.BaseVersion,
 		"Timestamp":   	msg.Time.Format("2006-01-02T15:04:05.999999-07:00"),
-		"msg":         	msg.Message,
+		"msg":         	msg.Message.ToJSON(),
 		"docker_engine":  map[string]interface{}{
 			"name": msg.Engine.Name,
 			"id": msg.Engine.ID,
